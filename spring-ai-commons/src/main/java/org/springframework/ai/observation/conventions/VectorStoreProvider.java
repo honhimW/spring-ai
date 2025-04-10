@@ -133,7 +133,12 @@ public enum VectorStoreProvider {
 	/**
 	 * Vector store provided by Weaviate.
 	 */
-	WEAVIATE("weaviate");
+	WEAVIATE("weaviate"),
+
+	/**
+	 * Vector store provided by SurrealDB.
+	 */
+	SURREALDB("surrealdb");
 
 	// @formatter:on
 
