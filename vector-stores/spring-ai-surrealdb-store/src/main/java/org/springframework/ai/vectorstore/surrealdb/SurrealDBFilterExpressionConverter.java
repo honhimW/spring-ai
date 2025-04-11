@@ -27,12 +27,43 @@ public class SurrealDBFilterExpressionConverter extends AbstractFilterExpression
 
 	@Override
 	protected void doExpression(Filter.Expression expression, StringBuilder context) {
-
+		if (expression.type() == Filter.ExpressionType.NOT) {
+			negate(expression, context);
+		} else {
+			this.convertOperand(expression.left(), context);
+			context.append(getOperationSymbol(expression));
+			this.convertOperand(expression.right(), context);
+		}
 	}
 
 	@Override
 	protected void doKey(Filter.Key filterKey, StringBuilder context) {
+		context.append(filterKey.key());
+	}
 
+	private void negate(Filter.Expression expression, StringBuilder context) {
+		if (expression.type() == Filter.ExpressionType.NOT) {
+			context.append("NOT(");
+		}
+		this.convertOperand(expression.left(), context);
+		context.append(")");
+	}
+
+	private String getOperationSymbol(Filter.Expression exp) {
+		return switch (exp.type()) {
+			case AND -> " AND ";
+			case OR -> " OR ";
+			case EQ -> " = ";
+			case NE -> " != ";
+			case LT -> " < ";
+			case LTE -> " <= ";
+			case GT -> " > ";
+			case GTE -> " >= ";
+			case IN -> " IN ";
+			case NIN -> " NOT IN ";
+			// you never know what the future might bring
+			default -> throw new RuntimeException("Not supported expression type: " + exp.type());
+		};
 	}
 
 }

@@ -19,6 +19,7 @@ import com.surrealdb.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.document.DocumentMetadata;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.embedding.EmbeddingOptionsBuilder;
 import org.springframework.ai.observation.conventions.VectorStoreProvider;
@@ -34,10 +35,7 @@ import org.springframework.lang.Nullable;
 import org.springframework.util.StringUtils;
 
 import java.lang.Object;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * @author honhimW
@@ -58,13 +56,17 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 
 	public static final Algorithm DEFAULT_VECTOR_ALGORITHM = Algorithm.HNSW;
 
-	public static final Type DEFAULT_VECTOR_TYPE = Type.F64;
+	public static final Type DEFAULT_VECTOR_TYPE = Type.F32;
 
 	public static final Distance DEFAULT_VECTOR_DISTANCE = Distance.COSINE;
 
 	public static final UpType DEFAULT_UPDATE_TYPE = UpType.CONTENT;
 
+	public static final int DEFAULT_EF = 100;
+
 	private static final String RECORD_ID_FIELD = "id";
+	private static final String SCORE_FIELD = "__score";
+	private static final String DISTANCE_FIELD = "__distance";
 
 	private final Surreal surreal;
 
@@ -86,6 +88,8 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 
 	private final UpType updateType;
 
+	private final int ef;
+
 	/**
 	 * Creates a new AbstractObservationVectorStore instance with the specified builder
 	 * settings. Initializes observation-related components and the embedding model.
@@ -104,6 +108,7 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 		this.vectorType = builder.vectorType;
 		this.vectorDistance = builder.vectorDistance;
 		this.updateType = builder.updateType;
+		this.ef = builder.ef;
 	}
 
 	public static Builder builder(Surreal surreal, EmbeddingModel embeddingModel) {
@@ -142,13 +147,49 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 		int topK = request.getTopK();
 		double similarityThreshold = request.getSimilarityThreshold();
 		Filter.Expression filterExpression = request.getFilterExpression();
-		Map<String, Object> bindings = new LinkedHashMap<>();
-		Response response = this.surreal.queryBind("""
-				SELECT
-				""", bindings);
-		Value take = response.take(0);
 
-		return List.of();
+		float[] embedding = this.embeddingModel.embed(query);
+
+		String scoreExpression = this.vectorDistance == Distance.COSINE ?
+				"vector::similarity::cosine(%s, $__embedding)".formatted(this.embeddingFieldName) :
+				"1 / (1 + vector::distance::knn())";
+		String embeddingExpression = this.vectorAlgorithm == Algorithm.HNSW ?
+				"%s <|%d,%d|>".formatted(this.embeddingFieldName, topK, this.ef) :
+				"%s <|%d|>".formatted(this.embeddingFieldName, topK);
+		// Since `queryBind` does not work with SDK 0.2.1, using `query` instead.
+		StringBuilder statement = new StringBuilder();
+		statement.append("LET $__embedding = ").append(Arrays.toString(embedding)).append(";\n");
+		String selectStatement = """
+				SELECT
+					%s, %s
+					%s AS %s,
+					vector::distance::knn() AS %s
+				FROM
+					%s
+				WHERE
+					%s
+				ORDER BY %s DESC;
+				""".formatted(
+				RECORD_ID_FIELD, this.contentFieldName,
+				scoreExpression, SCORE_FIELD,
+				this.tableName, DISTANCE_FIELD,
+				embeddingExpression,
+				SCORE_FIELD
+		);
+		statement.append(selectStatement);
+		String sql = statement.toString();
+		if (logger.isDebugEnabled()) {
+			logger.debug("vector search SQL\n{}", selectStatement);
+		}
+		Response response = this.surreal.query(sql);
+		Value selectResult = response.take(1);
+		Array array = selectResult.getArray();
+		int len = array.len();
+		List<Document> docs = new ArrayList<>(len);
+		for (Value item : array) {
+			docs.add(toDocument(item));
+		}
+		return docs;
 	}
 
 	@Override
@@ -161,7 +202,6 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 			case COSINE -> builder.similarityMetric(VectorStoreSimilarityMetric.COSINE.value());
 			case EUCLIDEAN -> builder.similarityMetric(VectorStoreSimilarityMetric.EUCLIDEAN.value());
 			case MANHATTAN -> builder.similarityMetric(VectorStoreSimilarityMetric.MANHATTAN.value());
-			default -> builder;
 		};
 	}
 
@@ -172,15 +212,15 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 		}
 
 		// Using `IF NOT EXISTS` to avoid errors if the index already exists.
-		this.surreal.query("""
-			DEFINE INDEX IF NOT EXISTS %s
-			ON %s
-			FIELDS %s
-			%s
-			DIMENSION %d
-			DIST %s
-			TYPE %s;
-			"""
+		String sql = """
+				DEFINE INDEX IF NOT EXISTS %s
+				ON %s
+				FIELDS %s
+				%s
+				DIMENSION %d
+				DIST %s
+				TYPE %s;
+				"""
 				.formatted(
 						indexName,
 						tableName,
@@ -189,7 +229,11 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 						this.embeddingModel.dimensions(),
 						vectorDistance,
 						vectorType
-				));
+				);
+		if (logger.isDebugEnabled()) {
+			logger.debug("define index SQL\n{}", sql);
+		}
+		this.surreal.query(sql);
 
 	}
 
@@ -207,7 +251,7 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 
 	public enum Distance {
 
-		COSINE, EUCLIDEAN, MANHATTAN, MINKOWSKI
+		COSINE, EUCLIDEAN, MANHATTAN
 
 	}
 
@@ -230,6 +274,8 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 		private Distance vectorDistance = DEFAULT_VECTOR_DISTANCE;
 
 		private UpType updateType = DEFAULT_UPDATE_TYPE;
+
+		private int ef = DEFAULT_EF;
 
 		private boolean initializeSchema = false;
 
@@ -294,6 +340,19 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 			return this;
 		}
 
+		/**
+		 * The size of the dynamic candidate list during the search, affecting the search’s accuracy and speed.
+		 *
+		 * @param ef ef during search
+		 * @return this
+		 */
+		public Builder ef(int ef) {
+			if (ef > 0) {
+				this.ef = ef;
+			}
+			return this;
+		}
+
 		public Builder initializeSchema(boolean initializeSchema) {
 			this.initializeSchema = initializeSchema;
 			return this;
@@ -307,6 +366,23 @@ public class SurrealDBVectorStore extends AbstractObservationVectorStore impleme
 
 	private RecordId recordId(String id) {
 		return new RecordId(this.tableName, id);
+	}
+
+	private Document toDocument(Value item) {
+		if (item.isObject()) {
+			com.surrealdb.Object record = item.getObject();
+			String id = record.get(RECORD_ID_FIELD).getThing().getId().getString();
+			double score = record.get(SCORE_FIELD).getDouble();
+			double distance = record.get(DISTANCE_FIELD).getDouble();
+			String content = record.get(contentFieldName).getString();
+			return Document.builder()
+					.id(id)
+					.text(content)
+					.score(score)
+					.metadata(DocumentMetadata.DISTANCE.value(), distance)
+					.build();
+		}
+		throw new IllegalStateException("item should be an object");
 	}
 
 }
