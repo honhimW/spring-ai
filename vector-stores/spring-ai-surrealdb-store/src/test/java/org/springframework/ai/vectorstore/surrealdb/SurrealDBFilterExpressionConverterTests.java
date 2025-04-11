@@ -15,11 +15,13 @@
 
 package org.springframework.ai.vectorstore.surrealdb;
 
+import jakarta.annotation.Nullable;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.ai.vectorstore.filter.Filter.*;
 
 import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * @author honhimW
@@ -31,17 +33,98 @@ public class SurrealDBFilterExpressionConverterTests {
 	static SurrealDBFilterExpressionConverter converter = new SurrealDBFilterExpressionConverter();
 
 	@Test
+	void and() {
+		String expr = convert(ExpressionType.AND,
+				new Expression(ExpressionType.EQ, new Key("flag"), new Value(true)),
+				new Expression(ExpressionType.EQ, new Key("flag"), new Value(false)));
+		assertThat(expr).isEqualTo("flag = true AND flag = false");
+	}
+
+	@Test
+	void or() {
+		String expr = convert(ExpressionType.OR,
+				new Expression(ExpressionType.EQ, new Key("flag"), new Value(true)),
+				new Expression(ExpressionType.EQ, new Key("flag"), new Value(false)));
+		assertThat(expr).isEqualTo("flag = true OR flag = false");
+	}
+
+	@Test
 	void eq() {
-		Filter.Expression expression = new Filter.Expression(Filter.ExpressionType.EQ, new Filter.Key("flag"), new Filter.Value(false));
-		String s = converter.convertExpression(expression);
-		System.out.println(s);
+		String expr = convert(ExpressionType.EQ, new Key("flag"), new Value(false));
+		assertThat(expr).isEqualTo("flag = false");
+	}
+
+	@Test
+	void ne() {
+		String expr = convert(ExpressionType.NE, new Key("flag"), new Value(false));
+		assertThat(expr).isEqualTo("flag != false");
+	}
+
+	@Test
+	void gt() {
+		String expr = convert(ExpressionType.GT, new Key("flag"), new Value(false));
+		assertThat(expr).isEqualTo("flag > false");
+	}
+
+	@Test
+	void gte() {
+		String expr = convert(ExpressionType.GTE, new Key("flag"), new Value(false));
+		assertThat(expr).isEqualTo("flag >= false");
+	}
+
+	@Test
+	void lt() {
+		String expr = convert(ExpressionType.LT, new Key("flag"), new Value(false));
+		assertThat(expr).isEqualTo("flag < false");
+	}
+
+	@Test
+	void lte() {
+		String expr = convert(ExpressionType.LTE, new Key("flag"), new Value(false));
+		assertThat(expr).isEqualTo("flag <= false");
 	}
 
 	@Test
 	void in() {
-		Filter.Expression expression = new Filter.Expression(Filter.ExpressionType.IN, new Filter.Key("flag"), new Filter.Value(List.of(true, false)));
-		String s = converter.convertExpression(expression);
-		System.out.println(s);
+		{
+			String expr = convert(ExpressionType.IN, new Key("flag"), new Value(true));
+			assertThat(expr).isEqualTo("flag IN true");
+		}
+		{
+			String expr = convert(ExpressionType.IN, new Key("flag"), new Value(List.of(true, false)));
+			assertThat(expr).isEqualTo("flag IN [true,false]");
+		}
+	}
+
+	@Test
+	void notIn() {
+		{
+			String expr = convert(ExpressionType.NIN, new Key("flag"), new Value(true));
+			assertThat(expr).isEqualTo("flag NOT IN true");
+		}
+		{
+			String expr = convert(ExpressionType.NIN, new Key("flag"), new Value(List.of(true, false)));
+			assertThat(expr).isEqualTo("flag NOT IN [true,false]");
+		}
+	}
+
+	@Test
+	void not() {
+		{
+			Expression expression = new Expression(ExpressionType.NOT, new Expression(ExpressionType.EQ, new Key("flag"), new Value(true)));
+			String expr = converter.convertExpression(expression);
+			assertThat(expr).isEqualTo("flag != true");
+		}
+		{
+			Expression expression = new Expression(ExpressionType.NOT, new Expression(ExpressionType.IN, new Key("flag"), new Value(List.of(true, false))));
+			String expr = converter.convertExpression(expression);
+			assertThat(expr).isEqualTo("flag NOT IN [true,false]");
+		}
+	}
+
+	private String convert(ExpressionType type, Operand left, @Nullable Operand right) {
+		Expression expression = new Expression(type, left, right);
+		return converter.convertExpression(expression);
 	}
 
 }
